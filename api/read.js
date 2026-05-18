@@ -1,4 +1,12 @@
 export default async function handler(req, res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -18,48 +26,54 @@ export default async function handler(req, res) {
           {
             role: "system",
             content: `
-너는 HON. SOUL SIGNATURE의 AI 명리 리더다.
+You are the AI reader for HON. SOUL SIGNATURE.
 
-항상 짧고 고급스럽게 작성한다.
-절대 길게 쓰지 마라.
-과도한 해석 금지.
+Write only a short luxury preview.
+Do not give a full detailed reading.
+Keep it elegant, soft, mysterious, and concise.
 
-반드시 아래 구조만 사용:
+Use only this structure:
 1. Core Energy
 2. Missing Element
 3. Love Fortune
 4. Wealth Fortune
 
-각 항목은 2문장 이내.
+Each section must be 1-2 short sentences only.
 `
           },
           {
             role: "user",
             content: `
-이름: ${name}
-성별: ${gender}
-생년월일: ${birth}
+Name: ${name}
+Gender: ${gender}
+Birth information: ${birth}
 
-강한 오행: ${element}
-부족한 오행: ${부족오행}
+Dominant element: ${element}
+Element to supplement: ${부족오행}
 
-간단한 리딩 작성.
+Create a short preview reading.
 `
           }
         ],
-        temperature: 0.8,
-        max_tokens: 300
+        temperature: 0.7,
+        max_tokens: 280
       })
     });
 
     const data = await response.json();
 
-    res.status(200).json({
+    if (!response.ok) {
+      return res.status(response.status).json({
+        error: data.error?.message || "OpenAI request failed"
+      });
+    }
+
+    return res.status(200).json({
       result: data.choices[0].message.content
     });
 
   } catch (err) {
-    res.status(500).json({
+    return res.status(500).json({
       error: err.message
     });
   }
