@@ -1,0 +1,8 @@
+[build]
+  functions = "netlify/functions"
+  publish = "public"
+
+[[redirects]]
+  from = "/webhook/shopify"
+  to = "/.netlify/functions/saju-webhook"
+  status = 200
