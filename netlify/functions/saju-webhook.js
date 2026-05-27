@@ -36,9 +36,9 @@ function extractSajuInfo(order) {
   return {
     customerName: order.billing_address?.first_name || order.customer?.first_name || "고객",
     email:        order.email || order.customer?.email,
-    birthDate:    get("생년월일") || get("birth_date") || get("birthday"),
-    birthTime:    get("태어난 시간") || get("birth_time") || get("birthtime"),
-    gender:       get("성별") || get("gender"),
+    birthDate:    get("Date of Birth"),
+    birthTime:    get("Hour of Birth"),
+    gender:       get("Gender"),
     orderNumber:  order.order_number || order.name,
     orderTotal:   order.total_price,
     currency:     order.currency,
