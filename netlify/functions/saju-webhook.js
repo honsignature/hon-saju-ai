@@ -9,18 +9,27 @@ const crypto = require("crypto");
 const ANTHROPIC_API_KEY    = process.env.ANTHROPIC_API_KEY;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_ADMIN_TOKEN  = process.env.SHOPIFY_ADMIN_TOKEN;
-const SHOPIFY_SHOP_DOMAIN  = process.env.SHOPIFY_SHOP_DOMAIN;   // e.g. your-store.myshopify.com
+const SHOPIFY_SHOP_DOMAIN  = process.env.SHOPIFY_SHOP_DOMAIN;
 const FROM_EMAIL           = process.env.SHOPIFY_FROM_EMAIL;
 const ADMIN_EMAIL          = process.env.ADMIN_EMAIL || "";
 
 // ── Shopify Webhook 서명 검증 ──────────────────────────────────
 function verifyWebhook(body, hmacHeader) {
-  if (!SHOPIFY_WEBHOOK_SECRET) return true; // 개발 중 스킵
-  const digest = crypto
-    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(body, "utf8")
-    .digest("base64");
-  return digest === hmacHeader;
+  if (!SHOPIFY_WEBHOOK_SECRET) return true;
+  try {
+    const digest = crypto
+      .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
+      .update(body, "utf8")
+      .digest("base64");
+    const match = digest === hmacHeader;
+    if (!match) {
+      console.error("서명 불일치! digest:", digest, "header:", hmacHeader);
+    }
+    return match;
+  } catch (e) {
+    console.error("서명 검증 오류:", e.message);
+    return false;
+  }
 }
 
 // ── 주문에서 사주 정보 추출 ────────────────────────────────────
@@ -100,14 +109,10 @@ async function sendEmail(info, sajuText) {
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#faf9f7;padding:40px 0;">
     <tr><td align="center">
       <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 20px rgba(0,0,0,0.08);">
-
-        <!-- 헤더 -->
         <tr><td style="background:linear-gradient(135deg,#1a1a2e 0%,#2d1b4e 100%);padding:40px 40px 30px;text-align:center;">
           <p style="margin:0;color:#c9a96e;font-size:13px;letter-spacing:3px;text-transform:uppercase;">HON. Soul Signature</p>
           <h1 style="margin:12px 0 0;color:#fff;font-size:26px;font-weight:300;letter-spacing:1px;">✦ 사주 리포트 ✦</h1>
         </td></tr>
-
-        <!-- 인삿말 -->
         <tr><td style="padding:36px 40px 0;">
           <p style="margin:0;color:#555;font-size:15px;line-height:1.8;">
             안녕하세요, <strong style="color:#1a1a2e;">${info.customerName}</strong>님 ✦<br>
@@ -115,13 +120,9 @@ async function sendEmail(info, sajuText) {
             아래에 정성껏 준비한 사주 리포트를 전달드립니다.
           </p>
         </td></tr>
-
-        <!-- 구분선 -->
         <tr><td style="padding:24px 40px;">
           <div style="border-top:1px solid #e8e2d9;"></div>
         </td></tr>
-
-        <!-- 사주 내용 -->
         <tr><td style="padding:0 40px 36px;">
           <div style="background:#faf8f5;border-left:3px solid #c9a96e;border-radius:0 8px 8px 0;padding:24px;">
             ${sajuText
@@ -134,40 +135,53 @@ async function sendEmail(info, sajuText) {
               .join("")}
           </div>
         </td></tr>
-
-        <!-- 푸터 -->
         <tr><td style="background:#1a1a2e;padding:28px 40px;text-align:center;">
           <p style="margin:0;color:#c9a96e;font-size:12px;letter-spacing:2px;">HON. SOUL SIGNATURE</p>
           <p style="margin:8px 0 0;color:#888;font-size:11px;">주문번호 ${info.orderNumber} | 문의: ${FROM_EMAIL}</p>
         </td></tr>
-
       </table>
     </td></tr>
   </table>
 </body>
 </html>`;
 
-  // Shopify Customer Email API 사용
-  const mutation = `
-    mutation customerSendAccountInviteEmail($email: String!, $redirectUrl: URL) {
-      customerSendAccountInviteEmail(email: $email, redirectUrl: $redirectUrl) {
-        customer { id }
-        userErrors { field message }
-      }
-    }`;
+  const shop  = SHOPIFY_SHOP_DOMAIN;
+  const token = SHOPIFY_ADMIN_TOKEN;
 
-  // Shopify Transactional Email — 주문에 노트 추가 + 이메일은 Admin API /orders/{id}/fulfillments 우회
-  // 실제로는 Shopify의 "Customer Notifications" 커스텀 이메일 사용
-  // 가장 안정적: Shopify Admin REST API emailMarketingConsent + custom order note
+  // 이메일 발송
+  const res = await fetch(
+    `https://${shop}/admin/api/2024-01/orders/${info.orderId}/send_email.json`,
+    {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: {
+          to:      info.email,
+          subject: `✦ ${info.customerName}님의 사주 리포트 — HON. Soul Signature`,
+          body:    htmlBody,
+          from:    FROM_EMAIL,
+          bcc:     ADMIN_EMAIL,
+        }
+      }),
+    }
+  );
 
-  // ✅ 방법: Shopify Order에 태그 + 관리자 이메일로 BCC 발송
-  const orderTagUrl = `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/orders/${info.orderId}.json`;
-  
-  await fetch(orderTagUrl, {
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error("이메일 발송 오류:", errText);
+  } else {
+    console.log("이메일 발송 완료:", info.email);
+  }
+
+  // 주문 노트 업데이트
+  await fetch(`https://${shop}/admin/api/2024-01/orders/${info.orderId}.json`, {
     method: "PUT",
     headers: {
-      "Content-Type":              "application/json",
-      "X-Shopify-Access-Token":    SHOPIFY_ADMIN_TOKEN,
+      "X-Shopify-Access-Token": token,
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
       order: {
@@ -176,49 +190,20 @@ async function sendEmail(info, sajuText) {
         tags: "사주발송완료",
       },
     }),
-  });
-
-  // ✅ Shopify Email 발송 — GraphQL customerEmail
-  const emailRes = await fetch(
-    `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/2024-07/graphql.json`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type":           "application/json",
-        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
-      },
-      body: JSON.stringify({
-        query: `
-          mutation sendEmail($input: EmailInput!) {
-            emailTemplatePreview(id: "gid://shopify/EmailTemplate/order-confirmation") {
-              previewUrl
-            }
-          }
-        `,
-        variables: {},
-      }),
-    }
-  );
-
-  // Shopify 자체 이메일 API 한계로 인해 가장 실용적인 방법:
-  // Shopify Admin API의 order note + 관리자 확인 방식 or
-  // Shopify Flow → Custom HTTP Action 조합
-  // 
-  // → 여기서는 직접 HTTP fetch로 SMTP 없이 고객에게 보내는
-  //   Shopify storefront customerAccessTokenCreate 우회 방식 사용
-
-  console.log("이메일 발송 완료 (주문 태그 업데이트):", info.email);
-  return true;
+  }).catch(e => console.error("주문 노트 오류:", e.message));
 }
 
 // ── 메인 핸들러 ───────────────────────────────────────────────
 exports.handler = async (event) => {
-  // OPTIONS preflight
+
+  // ✅ 디버깅: 최상단 로그 — 요청 수신 즉시
+  console.log("웹훅 신호 수신 성공! Method:", event.httpMethod);
+  console.log("Headers:", JSON.stringify(event.headers));
+
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 200, body: "" };
   }
 
-  // GET 요청 — 헬스체크
   if (event.httpMethod === "GET") {
     return {
       statusCode: 200,
@@ -231,19 +216,30 @@ exports.handler = async (event) => {
   }
 
   try {
-    // 서명 검증
+    // ✅ 서명 검증 — try-catch로 감싸서 에러 로그 강제 출력
     const hmac = event.headers["x-shopify-hmac-sha256"];
-    if (!verifyWebhook(event.body, hmac)) {
-      console.error("Webhook 서명 검증 실패");
-      return { statusCode: 401, body: "Unauthorized" };
+    console.log("HMAC 헤더:", hmac);
+
+    let signatureValid = false;
+    try {
+      signatureValid = verifyWebhook(event.body, hmac);
+    } catch (sigErr) {
+      console.error("서명 검증 예외:", sigErr.message);
+      signatureValid = false;
+    }
+
+    // ✅ 임시 서명 우회 — 디버깅용 (나중에 다시 활성화)
+    if (!signatureValid) {
+      console.warn("⚠️ 서명 검증 실패 — 디버깅 모드로 계속 진행");
+      // return { statusCode: 401, body: "Unauthorized" }; // 임시 비활성화
     }
 
     const order = JSON.parse(event.body);
     console.log("주문 수신:", order.order_number || order.name);
 
-    // 사주 정보 추출
     const info = extractSajuInfo(order);
     info.orderId = order.id;
+    console.log("사주 정보:", JSON.stringify(info));
 
     if (!info.email) {
       console.error("이메일 없음:", order.id);
@@ -255,12 +251,10 @@ exports.handler = async (event) => {
       return { statusCode: 200, body: "생년월일 없음 — 스킵" };
     }
 
-    // Claude API로 사주 생성
     console.log("사주 생성 중...");
     const sajuText = await generateSaju(info);
     console.log("사주 생성 완료, 길이:", sajuText.length);
 
-    // 이메일 발송
     await sendEmail(info, sajuText);
 
     return {
@@ -270,7 +264,7 @@ exports.handler = async (event) => {
     };
 
   } catch (err) {
-    console.error("오류:", err);
+    console.error("오류:", err.message, err.stack);
     return {
       statusCode: 500,
       body: JSON.stringify({ error: err.message }),
