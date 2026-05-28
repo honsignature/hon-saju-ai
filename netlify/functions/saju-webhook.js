@@ -1,6 +1,6 @@
 /**
- * HON. Soul Signature — 사주 자동화 Webhook v4
- * Shopify 주문 완료 → Claude API 사주 생성 → Resend 이메일 발송
+ * HON. Soul Signature — 사주 자동화 Webhook v5
+ * 핵심 수정: 즉시 200 응답 + 중복 방지 + Sonnet 모델 + 음력변환
  */
 
 const crypto = require("crypto");
@@ -34,50 +34,98 @@ function extractSajuInfo(order) {
     birthDate:    get("Your_Date_of_Birth"),
     birthTime:    get("Your_Birth_Hour"),
     gender:       get("Your_Gender"),
+    calendar:     get("Your_Calendar") || "solar",
     orderNumber:  order.order_number || order.name,
     orderId:      order.id,
+    tags:         order.tags || "",
   };
 }
 
+// 중복 방지: 주문 태그 확인
+async function isAlreadyProcessed(orderId) {
+  const shop  = SHOPIFY_SHOP_DOMAIN;
+  const token = SHOPIFY_ADMIN_TOKEN;
+  
+  const res = await fetch(`https://${shop}/admin/api/2024-01/orders/${orderId}.json?fields=tags`, {
+    headers: { "X-Shopify-Access-Token": token },
+  });
+  
+  if (!res.ok) return false;
+  const data = await res.json();
+  return (data.order?.tags || "").includes("saju-sent");
+}
+
+// 처리 완료 태그 추가
+async function markAsProcessed(orderId) {
+  const shop  = SHOPIFY_SHOP_DOMAIN;
+  const token = SHOPIFY_ADMIN_TOKEN;
+  
+  // 현재 태그 가져오기
+  const res = await fetch(`https://${shop}/admin/api/2024-01/orders/${orderId}.json?fields=tags`, {
+    headers: { "X-Shopify-Access-Token": token },
+  });
+  const data = await res.json();
+  const currentTags = data.order?.tags || "";
+  const newTags = currentTags ? `${currentTags}, saju-sent` : "saju-sent";
+
+  await fetch(`https://${shop}/admin/api/2024-01/orders/${orderId}.json`, {
+    method: "PUT",
+    headers: {
+      "X-Shopify-Access-Token": token,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ order: { id: orderId, tags: newTags } }),
+  });
+}
+
 async function generateSaju(info) {
-  const prompt = `You are a master of Korean Saju (Four Pillars of Destiny), a profound ancient system of astrology refined over thousands of years. Your task is to create a premium, deeply insightful Soul Reading Report for a client.
+  const calendarNote = info.calendar && info.calendar.toLowerCase().includes("lunar") 
+    ? "Note: The birth date provided is in the LUNAR calendar. Please account for this in your Four Pillars calculation."
+    : "The birth date provided is in the SOLAR (Gregorian) calendar.";
+
+  const prompt = `You are a grandmaster of Korean Saju (Four Pillars of Destiny), trained in the ancient lineage of Korean cosmic astrology. You create premium, deeply personal Soul Reading Reports for a luxury brand called HON. Soul Signature.
 
 Client Information:
 - Name: ${info.customerName}
-- Date of Birth: ${info.birthDate}
+- Date of Birth: ${info.birthDate} 
+- Calendar System: ${info.calendar || "solar"} (${calendarNote})
 - Hour of Birth: ${info.birthTime || "Not provided"}
 - Gender: ${info.gender || "Not provided"}
 
-Write a premium Soul Signature Report in English with the following sections. Be specific, poetic, deeply insightful, and use elegant language befitting a luxury brand. Each section should be at least 3-4 sentences. Do NOT use markdown symbols like **, ##, or *. Use plain text with section titles in ALL CAPS followed by a colon.
+Create a premium Soul Signature Report in English. Write with poetic authority, spiritual depth, and genuine insight. Be highly specific — mention the exact elemental forces, specific years, specific qualities. Make this feel like a bespoke luxury reading worth every penny.
+
+Do NOT use any markdown formatting symbols (no **, no ##, no *, no #). Use SECTION TITLES IN ALL CAPS followed by a colon and line break.
+
+Write the following sections, each with substantial depth (minimum 4-5 sentences per section):
 
 SOUL ESSENCE:
-A poetic, powerful opening that captures the essence of this person's cosmic energy and soul signature. Make it feel personal and profound.
+Open with a poetic, powerful statement about who this person is at a cosmic level. Reference their specific birth year animal and element.
 
 THE FOUR PILLARS:
-Describe the Year, Month, Day, and Hour pillars based on the birth information. Explain the elemental forces at play (Wood, Fire, Earth, Metal, Water) and their interactions. Be specific and detailed.
+Analyze each pillar specifically — Year Pillar (animal sign and element), Month Pillar (season and elemental influence), Day Pillar (core self), Hour Pillar (${info.birthTime || "unknown"} — inner world and hidden gifts). Be specific about elemental interactions.
 
 INNATE CHARACTER AND GIFTS:
-Describe their core personality, natural talents, and innate gifts revealed by their chart. Be specific and affirming.
+Their core nature, natural talents, psychological gifts. Be specific and affirming.
 
 LIFE PATH AND DESTINY:
-Their greater purpose, karmic lessons, and the arc of their life journey as revealed in the Four Pillars.
+Their greater purpose, karmic themes, the arc of their life journey.
 
 WEALTH AND CAREER:
-Specific insights into their relationship with wealth, ideal career paths, and how to maximize their professional potential.
+Specific insights about money, ideal careers, professional strengths. Name specific fields.
 
 LOVE AND RELATIONSHIPS:
-Their approach to love, ideal partnerships, relationship patterns, and advice for deeper connection.
+Their approach to love, ideal partner qualities, relationship patterns to transform.
 
 HEALTH AND VITALITY:
-Areas to nurture for optimal health based on their elemental balance, with practical wisdom.
+Elemental health insights, organs to nurture, lifestyle recommendations specific to their chart.
 
 2026 COSMIC FORECAST:
-Specific insights and guidance for the year 2026 — opportunities, challenges, and auspicious timing.
+Specific guidance for 2026 — key months, opportunities, energetic themes, warnings.
 
 SOUL GUIDANCE:
-A closing message of wisdom, affirmation, and guidance for their journey ahead. Make it feel like a blessing.
+A closing blessing and message of wisdom. Make it feel sacred and personal.
 
-Write with the authority of a master, the warmth of a mentor, and the poetry of an artist. This is a premium luxury experience.`;
+Write approximately 1500-2000 words total. This is a premium luxury product — every word should feel intentional and valuable.`;
 
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -87,8 +135,8 @@ Write with the authority of a master, the warmth of a mentor, and the poetry of 
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model:      "claude-haiku-4-5-20251001",
-      max_tokens: 3000,
+      model:      "claude-sonnet-4-5",
+      max_tokens: 4000,
       messages:   [{ role: "user", content: prompt }],
     }),
   });
@@ -102,98 +150,93 @@ Write with the authority of a master, the warmth of a mentor, and the poetry of 
 }
 
 function formatSajuText(text) {
-  // 섹션 제목 감지해서 HTML로 변환
-  const sections = text.split(/\n(?=[A-Z\s]+:)/);
-  return sections.map(section => {
-    const colonIndex = section.indexOf(':');
-    if (colonIndex > 0 && colonIndex < 60) {
-      const title = section.substring(0, colonIndex).trim();
-      const content = section.substring(colonIndex + 1).trim();
-      if (title === title.toUpperCase() && title.length > 3) {
-        return `<div style="margin-bottom:28px;">
-          <h3 style="margin:0 0 10px;color:#c9a96e;font-size:11px;letter-spacing:3px;text-transform:uppercase;font-family:Georgia,serif;">${title}</h3>
-          <p style="margin:0;color:#2c2c2c;font-size:15px;line-height:1.9;font-family:Georgia,serif;">${content.replace(/\n/g, '<br>')}</p>
-        </div>`;
-      }
+  const lines = text.split('\n');
+  let html = '';
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    // 섹션 제목 감지 (ALL CAPS + 콜론)
+    const titleMatch = line.match(/^([A-Z][A-Z\s&]+):(.*)$/);
+    if (titleMatch && titleMatch[1].length > 3) {
+      const title = titleMatch[1].trim();
+      const rest = titleMatch[2].trim();
+      html += `<div style="margin:32px 0 12px;">
+        <p style="margin:0 0 2px;color:#c9a96e;font-size:10px;letter-spacing:3px;font-family:Arial,sans-serif;text-transform:uppercase;">${title}</p>
+        <div style="width:24px;height:1px;background:#c9a96e;margin:6px 0 12px;"></div>
+        ${rest ? `<p style="margin:0;color:#2c2c2c;font-size:15px;line-height:1.9;font-family:Georgia,serif;">${rest}</p>` : ''}
+      </div>`;
+    } else {
+      html += `<p style="margin:0 0 14px;color:#2c2c2c;font-size:15px;line-height:1.9;font-family:Georgia,serif;">${line}</p>`;
     }
-    return `<p style="margin:0 0 16px;color:#2c2c2c;font-size:15px;line-height:1.9;font-family:Georgia,serif;">${section.replace(/\n/g, '<br>')}</p>`;
-  }).join('');
+  }
+  return html;
 }
 
 async function sendEmailViaResend(info, sajuText) {
   const formattedContent = formatSajuText(sajuText);
-  
+  const calendarLabel = info.calendar && info.calendar.toLowerCase().includes("lunar") ? "Lunar Calendar" : "Solar Calendar";
+
   const htmlBody = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Your Soul Signature Report — HON.</title>
 </head>
-<body style="margin:0;padding:0;background:#f5f3ef;font-family:Georgia,serif;">
-
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f3ef;padding:48px 0;">
+<body style="margin:0;padding:0;background:#f0ede8;font-family:Georgia,serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0ede8;padding:48px 20px;">
 <tr><td align="center">
-<table width="620" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:2px;overflow:hidden;box-shadow:0 4px 40px rgba(0,0,0,0.12);">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;background:#fff;overflow:hidden;box-shadow:0 8px 60px rgba(0,0,0,0.15);">
 
-  <!-- Header -->
-  <tr><td style="background:#0e0e0e;padding:52px 60px 44px;text-align:center;">
-    <p style="margin:0 0 8px;color:#c9a96e;font-size:10px;letter-spacing:5px;font-family:Arial,sans-serif;text-transform:uppercase;">H O N .</p>
-    <p style="margin:0 0 24px;color:#c9a96e;font-size:9px;letter-spacing:3px;font-family:Arial,sans-serif;text-transform:uppercase;">Soul Signature</p>
-    <div style="width:40px;height:1px;background:#c9a96e;margin:0 auto 24px;"></div>
-    <h1 style="margin:0;color:#f5f3ef;font-size:28px;font-weight:400;letter-spacing:2px;font-family:Georgia,serif;line-height:1.4;">Your Soul Reading</h1>
-    <p style="margin:12px 0 0;color:#888;font-size:12px;letter-spacing:2px;font-family:Arial,sans-serif;">A Personal Cosmic Report</p>
+  <tr><td style="background:#0a0a0a;padding:56px 60px 48px;text-align:center;">
+    <p style="margin:0 0 4px;color:#c9a96e;font-size:9px;letter-spacing:6px;font-family:Arial,sans-serif;">H · O · N</p>
+    <p style="margin:0 0 20px;color:#c9a96e;font-size:8px;letter-spacing:4px;font-family:Arial,sans-serif;">SOUL SIGNATURE</p>
+    <div style="width:1px;height:40px;background:linear-gradient(to bottom,transparent,#c9a96e,transparent);margin:0 auto 20px;"></div>
+    <h1 style="margin:0 0 8px;color:#f5f0e8;font-size:30px;font-weight:400;letter-spacing:3px;font-family:Georgia,serif;">Your Soul Reading</h1>
+    <p style="margin:0;color:#666;font-size:11px;letter-spacing:3px;font-family:Arial,sans-serif;text-transform:uppercase;">A Personal Cosmic Report</p>
   </td></tr>
 
-  <!-- Greeting -->
-  <tr><td style="padding:48px 60px 0;">
-    <p style="margin:0 0 8px;color:#c9a96e;font-size:10px;letter-spacing:3px;font-family:Arial,sans-serif;text-transform:uppercase;">Prepared for</p>
-    <h2 style="margin:0 0 24px;color:#0e0e0e;font-size:24px;font-weight:400;font-family:Georgia,serif;">${info.customerName}</h2>
-    <p style="margin:0 0 8px;color:#666;font-size:13px;line-height:1.8;font-family:Arial,sans-serif;">Date of Birth: ${info.birthDate}</p>
-    <p style="margin:0 0 8px;color:#666;font-size:13px;line-height:1.8;font-family:Arial,sans-serif;">Hour of Birth: ${info.birthTime || "Not provided"}</p>
-    <p style="margin:0;color:#666;font-size:13px;line-height:1.8;font-family:Arial,sans-serif;">Order: #${info.orderNumber}</p>
+  <tr><td style="padding:48px 60px 32px;">
+    <p style="margin:0 0 4px;color:#c9a96e;font-size:9px;letter-spacing:3px;font-family:Arial,sans-serif;text-transform:uppercase;">Prepared exclusively for</p>
+    <h2 style="margin:0 0 20px;color:#0a0a0a;font-size:26px;font-weight:400;font-family:Georgia,serif;letter-spacing:1px;">${info.customerName}</h2>
+    <table cellpadding="0" cellspacing="0">
+      <tr><td style="padding:4px 16px 4px 0;color:#999;font-size:11px;font-family:Arial,sans-serif;letter-spacing:1px;text-transform:uppercase;">Date of Birth</td><td style="color:#333;font-size:13px;font-family:Georgia,serif;">${info.birthDate} <span style="color:#c9a96e;font-size:11px;">(${calendarLabel})</span></td></tr>
+      <tr><td style="padding:4px 16px 4px 0;color:#999;font-size:11px;font-family:Arial,sans-serif;letter-spacing:1px;text-transform:uppercase;">Hour of Birth</td><td style="color:#333;font-size:13px;font-family:Georgia,serif;">${info.birthTime || "Not provided"}</td></tr>
+      <tr><td style="padding:4px 16px 4px 0;color:#999;font-size:11px;font-family:Arial,sans-serif;letter-spacing:1px;text-transform:uppercase;">Order</td><td style="color:#333;font-size:13px;font-family:Georgia,serif;">#${info.orderNumber}</td></tr>
+    </table>
   </td></tr>
 
-  <!-- Divider -->
-  <tr><td style="padding:36px 60px;">
+  <tr><td style="padding:0 60px 32px;">
     <div style="border-top:1px solid #e8e4dc;"></div>
   </td></tr>
 
-  <!-- Intro -->
-  <tr><td style="padding:0 60px 36px;">
-    <p style="margin:0;color:#555;font-size:14px;line-height:1.9;font-family:Georgia,serif;font-style:italic;">
+  <tr><td style="padding:0 60px 32px;">
+    <p style="margin:0;color:#666;font-size:14px;line-height:1.9;font-family:Georgia,serif;font-style:italic;border-left:2px solid #c9a96e;padding-left:20px;">
       The ancient Korean art of Saju — the Four Pillars of Destiny — holds within it the cosmic blueprint of your soul. What follows is a deeply personal reading, drawn from the exact moment of your birth and the elemental forces that shaped your arrival into this world.
     </p>
   </td></tr>
 
-  <!-- Divider -->
-  <tr><td style="padding:0 60px 36px;">
+  <tr><td style="padding:0 60px 32px;">
     <div style="border-top:1px solid #e8e4dc;"></div>
   </td></tr>
 
-  <!-- Report Content -->
   <tr><td style="padding:0 60px 48px;">
     ${formattedContent}
   </td></tr>
 
-  <!-- Divider -->
-  <tr><td style="padding:0 60px 0;">
-    <div style="border-top:1px solid #e8e4dc;"></div>
-  </td></tr>
-
-  <!-- Footer -->
-  <tr><td style="background:#0e0e0e;padding:40px 60px;text-align:center;">
-    <p style="margin:0 0 8px;color:#c9a96e;font-size:10px;letter-spacing:4px;font-family:Arial,sans-serif;text-transform:uppercase;">H O N .  S O U L  S I G N A T U R E</p>
-    <p style="margin:8px 0;color:#555;font-size:11px;font-family:Arial,sans-serif;letter-spacing:1px;">K-Heritage of Soul · Crafted by Time · Sealed in Korea</p>
-    <div style="width:30px;height:1px;background:#c9a96e;margin:16px auto;"></div>
-    <p style="margin:0;color:#444;font-size:11px;font-family:Arial,sans-serif;">If you have any questions, contact us at <a href="mailto:${FROM_EMAIL}" style="color:#c9a96e;text-decoration:none;">${FROM_EMAIL}</a></p>
-    <p style="margin:8px 0 0;color:#333;font-size:10px;font-family:Arial,sans-serif;">This report is for personal use only. Unauthorized reproduction is strictly prohibited.</p>
+  <tr><td style="background:#0a0a0a;padding:44px 60px;text-align:center;">
+    <div style="width:30px;height:1px;background:#c9a96e;margin:0 auto 20px;"></div>
+    <p style="margin:0 0 6px;color:#c9a96e;font-size:9px;letter-spacing:5px;font-family:Arial,sans-serif;">H · O · N · S O U L · S I G N A T U R E</p>
+    <p style="margin:0 0 16px;color:#444;font-size:11px;font-family:Arial,sans-serif;letter-spacing:1px;">K-Heritage of Soul · Crafted by Time · Sealed in Korea</p>
+    <div style="width:30px;height:1px;background:#333;margin:0 auto 16px;"></div>
+    <p style="margin:0 0 4px;color:#444;font-size:11px;font-family:Arial,sans-serif;">Questions? <a href="mailto:${FROM_EMAIL}" style="color:#c9a96e;text-decoration:none;">${FROM_EMAIL}</a></p>
+    <p style="margin:0;color:#333;font-size:10px;font-family:Arial,sans-serif;">This report is for personal use only. Unauthorized reproduction is prohibited.</p>
   </td></tr>
 
 </table>
 </td></tr>
 </table>
-
 </body>
 </html>`;
 
@@ -220,6 +263,30 @@ async function sendEmailViaResend(info, sajuText) {
   return result;
 }
 
+async function processOrder(info) {
+  try {
+    // 중복 방지 체크
+    const alreadyDone = await isAlreadyProcessed(info.orderId);
+    if (alreadyDone) {
+      console.log("Already processed, skipping:", info.orderNumber);
+      return;
+    }
+
+    // 즉시 처리 중 표시 (중복 방지)
+    await markAsProcessed(info.orderId);
+
+    console.log("Generating saju report...");
+    const sajuText = await generateSaju(info);
+    console.log("Report generated, length:", sajuText.length);
+
+    await sendEmailViaResend(info, sajuText);
+    console.log("Done:", info.orderNumber);
+
+  } catch (err) {
+    console.error("Process error:", err.message);
+  }
+}
+
 exports.handler = async (event) => {
   console.log("Webhook received! Method:", event.httpMethod);
 
@@ -231,34 +298,31 @@ exports.handler = async (event) => {
     return { statusCode: 405, body: "Method Not Allowed" };
   }
 
+  // 서명 검증
+  const hmac = event.headers["x-shopify-hmac-sha256"];
+  verifyWebhook(event.body, hmac);
+
+  let order;
   try {
-    const hmac = event.headers["x-shopify-hmac-sha256"];
-    verifyWebhook(event.body, hmac);
-
-    const order = JSON.parse(event.body);
-    console.log("Order received:", order.order_number);
-
-    const info = extractSajuInfo(order);
-    console.log("Saju info:", JSON.stringify(info));
-
-    if (!info.email || !info.birthDate) {
-      console.log("Missing info — skipping");
-      return { statusCode: 200, body: "Skipped" };
-    }
-
-    console.log("Generating saju report...");
-    const sajuText = await generateSaju(info);
-    console.log("Report generated, length:", sajuText.length);
-
-    await sendEmailViaResend(info, sajuText);
-
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ success: true, order: info.orderNumber }),
-    };
-
-  } catch (err) {
-    console.error("Error:", err.message);
-    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
+    order = JSON.parse(event.body);
+  } catch (e) {
+    return { statusCode: 400, body: "Invalid JSON" };
   }
+
+  console.log("Order received:", order.order_number);
+  const info = extractSajuInfo(order);
+
+  if (!info.email || !info.birthDate) {
+    console.log("Missing info — skipping");
+    return { statusCode: 200, body: "Skipped" };
+  }
+
+  // ✅ 즉시 200 응답 (Shopify 재시도 방지)
+  // 백그라운드에서 처리 (waitUntil 없이 비동기 실행)
+  processOrder(info).catch(err => console.error("Background error:", err.message));
+
+  return {
+    statusCode: 200,
+    body: JSON.stringify({ received: true, order: info.orderNumber }),
+  };
 };
